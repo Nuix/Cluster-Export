@@ -35,19 +35,6 @@ class NxExporter
     @@progress = 0
   end
 
-  # Prompts user to choose a directory.
-  #
-  # @return [String, nil] absolute path or nil if canceled
-  def self.choose_export_dir
-    java_import javax.swing.JFileChooser
-    c = JFileChooser.new
-    c.setFileSelectionMode(JFileChooser::DIRECTORIES_ONLY)
-    c.setDialogTitle('Select Export Directory')
-    return nil unless c.showOpenDialog(nil) == JFileChooser::APPROVE_OPTION
-
-    c.getSelectedFile.getAbsolutePath
-  end
-
   # Increments and sets main progress.
   def advance_main
     @@progress += 1
