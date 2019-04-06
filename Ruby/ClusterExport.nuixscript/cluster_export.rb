@@ -2,7 +2,23 @@
 # Needs Case: true
 # @version 1.0.0
 
-require_relative 'nx_exporter.rb' # v2.1.0
+begin # Nx Bootstrap
+  require File.join(__dir__, 'Nx.jar')
+  java_import 'com.nuix.nx.NuixConnection'
+  java_import 'com.nuix.nx.LookAndFeelHelper'
+  java_import 'com.nuix.nx.dialogs.ChoiceDialog'
+  java_import 'com.nuix.nx.dialogs.CommonDialogs'
+  java_import 'com.nuix.nx.dialogs.ProcessingStatusDialog'
+  java_import 'com.nuix.nx.dialogs.ProgressDialog'
+  java_import 'com.nuix.nx.dialogs.TabbedCustomDialog'
+  java_import 'com.nuix.nx.digest.DigestHelper'
+  java_import 'com.nuix.nx.controls.models.Choice'
+  LookAndFeelHelper.setWindowsIfMetal
+  NuixConnection.setUtilities($utilities)
+  NuixConnection.setCurrentNuixVersion(NUIX_VERSION)
+end
+require 'fileutils'
+require 'rexml/document'
 
 # Handles pseudoclusters with negative IDs.
 #
@@ -23,7 +39,8 @@ ITEM_UTILITY = $utilities.get_item_utility
 # * +@exporter+ is the BinaryExporter
 # * +@target_directory+ is the export directory
 # * +@exported+ is a hash of the exported files { path => [MD5]}
-class ClusterExport < NxExporter
+# * +@@dialog+ is an Nx ProcessDialog
+class ClusterExport
   # Export items by cluster.
   #
   # @param settings [Hash] input from CustomExportSettings
@@ -33,10 +50,17 @@ class ClusterExport < NxExporter
     @target_directory = File.join(@settings['dir'], @settings['cluster_run'])
     @exported = Hash.new { |h, k| h[k] = [] }
     ProgressDialog.forBlock do |progress_dialog|
-      super(progress_dialog, 'Cluster Export')
+      @dialog = initalize_dialog(progress_dialog, 'Cluster Export')
       run
       close_nx
     end
+  end
+
+  # Completes the dialog, or logs the abortion.
+  def close_nx
+    return @dialog.setCompleted unless @dialog.abortWasRequested
+
+    @dialog.setMainStatusAndLogIt('Aborted')
   end
 
   # Exports item.
@@ -48,8 +72,20 @@ class ClusterExport < NxExporter
     md5 = item.get_digests.get_md5
     @exported[target_path] << md5 # add before target_path changes
     target_path = new_file_path(target_path, md5) if File.exist?(target_path)
-    @@dialog.logMessage("Exporting #{target_path}")
+    @dialog.logMessage("Exporting #{target_path}")
     @exporter.exportItem(item, target_path)
+  end
+
+  # Initializes ProgressDialog
+  #
+  # @param progress_dialog [ProgressDialog]
+  # @param title [String]
+  # @return [ProgressDialog]
+  def initalize_dialog(progress_dialog, title)
+    progress_dialog.setTitle(title)
+    progress_dialog.setLogVisible(true)
+    progress_dialog.setTimestampLoggedMessages(true)
+    progress_dialog
   end
 
   # Returns approriate file extension for item.
@@ -100,14 +136,14 @@ class ClusterExport < NxExporter
 
   # Renames iniitial files with name colisions to include digest.
   def rename_exported
-    @@dialog.setSubStatusAndLogIt('Including MD5 for filename colisions')
+    @dialog.setSubStatusAndLogIt('Including MD5 for filename colisions')
     paths = @exported.reject { |_k, v| v.size == 1 }
-    @@dialog.logMessage("Adding hash to #{paths.size} items")
-    @@dialog.setSubProgress(0, paths.size)
+    @dialog.logMessage("Adding hash to #{paths.size} items")
+    @dialog.setSubProgress(0, paths.size)
     paths.each_with_index do |(path, hashes), index|
-      @@dialog.setSubProgress(index)
+      @dialog.setSubProgress(index)
       new_path = new_file_path(path, hashes.first)
-      @@dialog.logMessage("Renaming to #{new_path}")
+      @dialog.logMessage("Renaming to #{new_path}")
       File.rename(path, new_path)
     end
   end
@@ -115,14 +151,14 @@ class ClusterExport < NxExporter
   # Exports each cluster.
   def run
     clusters = @settings['clusters']
-    @@dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
-    @@dialog.logMessage("Target directory is #{@target_directory}")
-    @@dialog.setMainProgress(0, clusters.size)
+    @dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
+    @dialog.logMessage("Target directory is #{@target_directory}")
+    @dialog.setMainProgress(0, clusters.size)
     # Iterate each cluster
     clusters.each_with_index do |c, c_index|
-      @@dialog.setMainProgress(c_index)
+      @dialog.setMainProgress(c_index)
       run_cluster(c)
-      return nil if @@dialog.abortWasRequested
+      return nil if @dialog.abortWasRequested
     end
     # Rename files that had name colisions
     rename_exported
@@ -133,10 +169,10 @@ class ClusterExport < NxExporter
   # @param cluster [Cluster]
   def run_cluster(cluster)
     name = cluster_id(cluster)
-    @@dialog.setSubStatusAndLogIt("Exporting Cluster #{name}")
+    @dialog.setSubStatusAndLogIt("Exporting Cluster #{name}")
     # Iterate each item in cluster after deduplication
     items = cluster.get_items.map(&:get_item)
-    @@dialog.logMessage("Cluster has #{items.size} items")
+    @dialog.logMessage("Cluster has #{items.size} items")
     run_items(items, File.join(@target_directory, name.to_s))
   end
 
@@ -148,12 +184,12 @@ class ClusterExport < NxExporter
     # Make sure output directory exists
     FileUtils.mkdir_p(target_directory_cluster)
     deduped_items = ITEM_UTILITY.deduplicate(items)
-    @@dialog.logMessage("#{deduped_items.size} items after deduplicating")
-    @@dialog.setSubProgress(0, deduped_items.size)
+    @dialog.logMessage("#{deduped_items.size} items after deduplicating")
+    @dialog.setSubProgress(0, deduped_items.size)
     deduped_items.each_with_index do |i, i_index|
-      @@dialog.setSubProgress(i_index)
+      @dialog.setSubProgress(i_index)
       export_item(i, target_directory_cluster)
-      return nil if @@dialog.abortWasRequested
+      return nil if @dialog.abortWasRequested
     end
   end
 
