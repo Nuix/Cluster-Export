@@ -1,6 +1,6 @@
 # Menu Title: Cluster Export
 # Needs Case: true
-# @version 1.0.0
+# @version 1.0.1
 
 begin # Nx Bootstrap
   require File.join(__dir__, 'Nx.jar')
@@ -17,7 +17,6 @@ begin # Nx Bootstrap
   NuixConnection.setUtilities($utilities)
   NuixConnection.setCurrentNuixVersion(NUIX_VERSION)
 end
-require 'fileutils'
 require 'rexml/document'
 
 # Handles pseudoclusters with negative IDs.
@@ -47,12 +46,12 @@ class ClusterExport
   def initialize(settings)
     @settings = settings
     @exporter = $utilities.get_binary_exporter
-    @target_directory = File.join(@settings['dir'], @settings['cluster_run'])
+    # strip the cluster run name in case it ends with a space
+    @target_directory = File.join(@settings['dir'], @settings['cluster_run'].strip)
     @exported = Hash.new { |h, k| h[k] = [] }
     ProgressDialog.forBlock do |progress_dialog|
       @dialog = initalize_dialog(progress_dialog, 'Cluster Export')
       run
-      close_nx
     end
   end
 
@@ -74,6 +73,17 @@ class ClusterExport
     target_path = new_file_path(target_path, md5) if File.exist?(target_path)
     @dialog.logMessage("Exporting #{target_path}")
     @exporter.exportItem(item, target_path)
+  end
+
+  # Initializes ProgressDialog and gets selected clusters.
+  #
+  # @return [Set<Cluster>] the clusters to export
+  def initialize_cluster_run
+    clusters = @settings['clusters']
+    @dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
+    @dialog.logMessage("Target directory is #{@target_directory}")
+    @dialog.setMainProgress(0, clusters.size)
+    clusters
   end
 
   # Initializes ProgressDialog
@@ -150,18 +160,14 @@ class ClusterExport
 
   # Exports each cluster.
   def run
-    clusters = @settings['clusters']
-    @dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
-    @dialog.logMessage("Target directory is #{@target_directory}")
-    @dialog.setMainProgress(0, clusters.size)
-    # Iterate each cluster
-    clusters.each_with_index do |c, c_index|
+    initialize_cluster_run.each_with_index do |c, c_index|
       @dialog.setMainProgress(c_index)
       run_cluster(c)
       return nil if @dialog.abortWasRequested
     end
     # Rename files that had name colisions
     rename_exported
+    close_nx
   end
 
   # Exports items from cluster.
@@ -182,7 +188,7 @@ class ClusterExport
   # @param target_directory_cluster [String] export path
   def run_items(items, target_directory_cluster)
     # Make sure output directory exists
-    FileUtils.mkdir_p(target_directory_cluster)
+    java.io.File.new(target_directory_cluster).mkdirs
     deduped_items = ITEM_UTILITY.deduplicate(items)
     @dialog.logMessage("#{deduped_items.size} items after deduplicating")
     @dialog.setSubProgress(0, deduped_items.size)
@@ -198,7 +204,7 @@ class ClusterExport
   # @param value [String]
   # @return [String]
   def sanitize(value)
-    value.gsub(%r{[<>:\"|?*\[\]\(\)\\/\t]}, '_')
+    value.gsub(%r{[\p{cc}<>:\"|?*\[\]\(\)\\/\t]}, '_')
   end
 end
 
