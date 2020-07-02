@@ -37,7 +37,6 @@ ITEM_UTILITY = $utilities.get_item_utility
 # * +@settings+ is input from the dialog
 # * +@exporter+ is the BinaryExporter
 # * +@target_directory+ is the export directory
-# * +@exported+ is a hash of the exported files { path => [MD5]}
 # * +@@dialog+ is an Nx ProcessDialog
 class ClusterExport
   # Export items by cluster.
@@ -48,7 +47,6 @@ class ClusterExport
     @exporter = $utilities.get_binary_exporter
     # strip the cluster run name in case it ends with a space
     @target_directory = File.join(@settings['dir'], @settings['cluster_run'].strip)
-    @exported = Hash.new { |h, k| h[k] = [] }
     ProgressDialog.forBlock do |progress_dialog|
       @dialog = initalize_dialog(progress_dialog, 'Cluster Export')
       run
@@ -60,19 +58,6 @@ class ClusterExport
     return @dialog.setCompleted unless @dialog.abortWasRequested
 
     @dialog.setMainStatusAndLogIt('Aborted')
-  end
-
-  # Exports item.
-  #
-  # @param item [item]
-  # @param target_directory_cluster [String] target directory for item
-  def export_item(item, target_directory_cluster)
-    target_path = File.join(target_directory_cluster, new_file_name(item))
-    md5 = item.get_digests.get_md5
-    @exported[target_path] << md5 # add before target_path changes
-    target_path = new_file_path(target_path, md5) if File.exist?(target_path)
-    @dialog.logMessage("Exporting #{target_path}")
-    @exporter.exportItem(item, target_path)
   end
 
   # Initializes ProgressDialog and gets selected clusters.
@@ -144,20 +129,6 @@ class ClusterExport
     obj.nil? || obj.strip.empty?
   end
 
-  # Renames iniitial files with name colisions to include digest.
-  def rename_exported
-    @dialog.setSubStatusAndLogIt('Including MD5 for filename colisions')
-    paths = @exported.reject { |_k, v| v.size == 1 }
-    @dialog.logMessage("Adding hash to #{paths.size} items")
-    @dialog.setSubProgress(0, paths.size)
-    paths.each_with_index do |(path, hashes), index|
-      @dialog.setSubProgress(index)
-      new_path = new_file_path(path, hashes.first)
-      @dialog.logMessage("Renaming to #{new_path}")
-      File.rename(path, new_path)
-    end
-  end
-
   # Exports each cluster.
   def run
     initialize_cluster_run.each_with_index do |c, c_index|
@@ -165,8 +136,6 @@ class ClusterExport
       run_cluster(c)
       return nil if @dialog.abortWasRequested
     end
-    # Rename files that had name colisions
-    rename_exported
     close_nx
   end
 
@@ -192,9 +161,31 @@ class ClusterExport
     deduped_items = ITEM_UTILITY.deduplicate(items)
     @dialog.logMessage("#{deduped_items.size} items after deduplicating")
     @dialog.setSubProgress(0, deduped_items.size)
-    deduped_items.each_with_index do |i, i_index|
+    
+    # Track if any calculated output paths occur more than
+    # once, which would result in a overwrite due to filename collision
+    path_counts = Hash.new{|h,k|h[k]=0}
+    
+    # Calculate up front where will be putting each item's native
+    export_details = deduped_items.map do |item|
+      path = File.join(target_directory_cluster, new_file_name(item))
+      path_counts += 1
+      next {:item=>item,:path=>path}
+    end
+    
+    # Run through our pre-calculated details, fix up any outputfile names
+    # that would have collided
+    export_details.each do |export_detail|
+      if path_counts[export_detail[:path]] > 1
+        export_detail[:path] = new_file_path(export_details[:path])
+      end
+    end
+
+    # Now that we know where everything will go, lets export them
+    export_details.each_with_index do |export_detail, i_index|
       @dialog.setSubProgress(i_index)
-      export_item(i, target_directory_cluster)
+      @dialog.logMessage("Exporting #{export_detail[:path]}")
+      @exporter.exportItem(export_detail[:item], export_detail[:path])
       return nil if @dialog.abortWasRequested
     end
   end
