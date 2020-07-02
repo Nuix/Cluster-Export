@@ -18,6 +18,7 @@ begin # Nx Bootstrap
   NuixConnection.setCurrentNuixVersion(NUIX_VERSION)
 end
 require 'rexml/document'
+require 'csv'
 
 # Handles pseudoclusters with negative IDs.
 #
@@ -51,6 +52,18 @@ class ClusterExport
       @dialog = initalize_dialog(progress_dialog, 'Cluster Export')
       run
     end
+  end
+
+  # Opens CSV for writing
+  #
+  # @param file_path Where the CSV will be located
+  def open_csv(file_path)
+    @csv = CSV.open(file_path,"w:utf-8")
+  end
+
+  # Closes the CSV
+  def close_csv
+    @csv.close
   end
 
   # Completes the dialog, or logs the abortion.
@@ -131,11 +144,23 @@ class ClusterExport
 
   # Exports each cluster.
   def run
+    java.io.File.new(@target_directory).mkdirs
+    csv_file = File.join(@target_directory,"Report.csv")
+    open_csv(csv_file)
+    @csv << [
+      "Item GUID",
+      "Item Name",
+      "Item MD5",
+      "Item Tags",
+      "Cluster ID",
+      "Path",
+    ]
     initialize_cluster_run.each_with_index do |c, c_index|
       @dialog.setMainProgress(c_index)
       run_cluster(c)
       return nil if @dialog.abortWasRequested
     end
+    close_csv
     close_nx
   end
 
@@ -148,14 +173,15 @@ class ClusterExport
     # Iterate each item in cluster after deduplication
     items = cluster.get_items.map(&:get_item)
     @dialog.logMessage("Cluster has #{items.size} items")
-    run_items(items, File.join(@target_directory, name.to_s))
+    run_items(items, File.join(@target_directory, name.to_s), cluster)
   end
 
   # Exports items after deduplicating.
   #
   # @param items [Collection<Items>]
   # @param target_directory_cluster [String] export path
-  def run_items(items, target_directory_cluster)
+  # @param cluster The cluster object
+  def run_items(items, target_directory_cluster, cluster)
     # Make sure output directory exists
     java.io.File.new(target_directory_cluster).mkdirs
     deduped_items = ITEM_UTILITY.deduplicate(items)
@@ -168,8 +194,8 @@ class ClusterExport
     
     # Calculate up front where will be putting each item's native
     export_details = deduped_items.map do |item|
-      path = File.join(target_directory_cluster, new_file_name(item))
-      path_counts += 1
+      path = File.join(target_directory_cluster,new_file_name(item))
+      path_counts[path] += 1
       next {:item=>item,:path=>path}
     end
     
@@ -177,15 +203,26 @@ class ClusterExport
     # that would have collided
     export_details.each do |export_detail|
       if path_counts[export_detail[:path]] > 1
-        export_detail[:path] = new_file_path(export_details[:path])
+        export_detail[:path] = new_file_path(export_detail[:path],export_detail[:item].getDigests.getMd5)
       end
     end
 
     # Now that we know where everything will go, lets export them
     export_details.each_with_index do |export_detail, i_index|
+      item = export_detail[:item]
+      path = export_detail[:path]
       @dialog.setSubProgress(i_index)
-      @dialog.logMessage("Exporting #{export_detail[:path]}")
-      @exporter.exportItem(export_detail[:item], export_detail[:path])
+      @dialog.logMessage("Exporting #{path}")
+      @exporter.exportItem(item, path)
+      # Write record to CSV
+      @csv << [
+        item.getGuid,
+        item.getLocalisedName,
+        item.getDigests.getMd5,
+        item.getTags.join("; "),
+        cluster_id(cluster),
+        path,
+      ]
       return nil if @dialog.abortWasRequested
     end
   end
@@ -232,6 +269,7 @@ class ClusterExportSettings
   def append_dynamic_table(identifier, control)
     header = ['Cluster Run', 'ID', 'Items', 'Deduplicated Items']
     run_control = @main_tab.getControl(control)
+    dedupe_count_cache = {}
     @main_tab.appendDynamicTable(identifier, 'Clusters', header, cluster_records(@cluster_runs[0].get_name)) do |record, column_index, _setting_value, _value|
       items = record.get_items
       case column_index
@@ -242,7 +280,11 @@ class ClusterExportSettings
       when 2
         items.size
       when 3
-        ITEM_UTILITY.deduplicate(items.map(&:get_item)).size
+        dedupe_count = dedupe_count_cache[record.getId]
+        if dedupe_count.nil?
+          dedupe_count = dedupe_count_cache[record.getId] = ITEM_UTILITY.deduplicate(items.map(&:get_item)).size
+        end
+        dedupe_count
       end
     end
     initialize_dynamic_table(identifier, run_control)
