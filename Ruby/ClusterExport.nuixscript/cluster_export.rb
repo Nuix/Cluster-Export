@@ -1,8 +1,9 @@
 # Menu Title: Cluster Export
 # Needs Case: true
-# @version 1.0.1
+# @version 2.0.0
 
-begin # Nx Bootstrap
+# Nx Bootstrap
+begin
   require File.join(__dir__, 'Nx.jar')
   java_import 'com.nuix.nx.NuixConnection'
   java_import 'com.nuix.nx.LookAndFeelHelper'
@@ -58,7 +59,7 @@ class ClusterExport
   #
   # @param file_path Where the CSV will be located
   def open_csv(file_path)
-    @csv = CSV.open(file_path,"w:utf-8")
+    @csv = CSV.open(file_path, 'w:utf-8')
   end
 
   # Closes the CSV
@@ -145,15 +146,15 @@ class ClusterExport
   # Exports each cluster.
   def run
     java.io.File.new(@target_directory).mkdirs
-    csv_file = File.join(@target_directory,"Report.csv")
+    csv_file = File.join(@target_directory, 'Report.csv')
     open_csv(csv_file)
     @csv << [
-      "Item GUID",
-      "Item Name",
-      "Item MD5",
-      "Item Tags",
-      "Cluster ID",
-      "Path",
+      'Item GUID',
+      'Item Name',
+      'Item MD5',
+      'Item Tags',
+      'Cluster ID',
+      'Path'
     ]
     initialize_cluster_run.each_with_index do |c, c_index|
       @dialog.setMainProgress(c_index)
@@ -187,23 +188,23 @@ class ClusterExport
     deduped_items = ITEM_UTILITY.deduplicate(items)
     @dialog.logMessage("#{deduped_items.size} items after deduplicating")
     @dialog.setSubProgress(0, deduped_items.size)
-    
+
     # Track if any calculated output paths occur more than
     # once, which would result in a overwrite due to filename collision
-    path_counts = Hash.new{|h,k|h[k]=0}
-    
+    path_counts = Hash.new { |h, k| h[k] = 0 }
+
     # Calculate up front where will be putting each item's native
     export_details = deduped_items.map do |item|
-      path = File.join(target_directory_cluster,new_file_name(item))
+      path = File.join(target_directory_cluster, new_file_name(item))
       path_counts[path] += 1
-      next {:item=>item,:path=>path}
+      next { item: item, path: path }
     end
-    
+
     # Run through our pre-calculated details, fix up any outputfile names
     # that would have collided
     export_details.each do |export_detail|
       if path_counts[export_detail[:path]] > 1
-        export_detail[:path] = new_file_path(export_detail[:path],export_detail[:item].getDigests.getMd5)
+        export_detail[:path] = new_file_path(export_detail[:path], export_detail[:item].getDigests.getMd5)
       end
     end
 
@@ -219,9 +220,9 @@ class ClusterExport
         item.getGuid,
         item.getLocalisedName,
         item.getDigests.getMd5,
-        item.getTags.join("; "),
+        item.getTags.join('; '),
         cluster_id(cluster),
-        path,
+        path
       ]
       return nil if @dialog.abortWasRequested
     end
@@ -344,8 +345,12 @@ class ClusterExportSettings
   # @param values [Hash] input values
   # @return [true, false] if in valid run state
   def validate_input(values)
-    return CommonDialogs.showWarning('Please select export directory') if values['dir'].empty?
-    return CommonDialogs.showWarning('Please select clusters') if values['clusters'].empty?
+    if values['dir'].empty?
+      return CommonDialogs.showWarning('Please select export directory')
+    end
+    if values['clusters'].empty?
+      return CommonDialogs.showWarning('Please select clusters')
+    end
 
     true
   end
