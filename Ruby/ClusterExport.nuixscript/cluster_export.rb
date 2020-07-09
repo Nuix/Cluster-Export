@@ -1,8 +1,11 @@
 # Menu Title: Cluster Export
 # Needs Case: true
-# @version 1.0.1
+# @version 2.0.0
 
-begin # Nx Bootstrap
+VERBOSE = false
+
+begin
+  # Nx Bootstrap
   require File.join(__dir__, 'Nx.jar')
   java_import 'com.nuix.nx.NuixConnection'
   java_import 'com.nuix.nx.LookAndFeelHelper'
@@ -18,27 +21,29 @@ begin # Nx Bootstrap
   NuixConnection.setCurrentNuixVersion(NUIX_VERSION)
 end
 require 'rexml/document'
+require 'csv'
 
+ITEM_UTILITY = $utilities.get_item_utility
+
+# Returns cluster name.
 # Handles pseudoclusters with negative IDs.
 #
-# @param cluster [Cluster] the cluster
-# @return [Integer, String] ID number, or name for negative ID pseudoclusters
-def cluster_id(cluster)
-  id = cluster.getId
+# @param id [Integer] a cluster's ID
+# @return [String] ID, or name for negative ID pseudoclusters
+def id_to_name(id)
   return 'unclusterable' if id == -1
   return 'ignorable' if id == -2
 
-  id
+  id.to_s
 end
-
-ITEM_UTILITY = $utilities.get_item_utility
 
 # Class for exporting items by cluster.
 # * +@settings+ is input from the dialog
 # * +@exporter+ is the BinaryExporter
 # * +@target_directory+ is the export directory
-# * +@exported+ is a hash of the exported files { path => [MD5]}
-# * +@@dialog+ is an Nx ProcessDialog
+# * +@failures+ is {GUID => error message} for items that failed to export
+# * +@dialog+ is an Nx ProcessDialog
+# * +@csv+ is the report CSV
 class ClusterExport
   # Export items by cluster.
   #
@@ -48,42 +53,83 @@ class ClusterExport
     @exporter = $utilities.get_binary_exporter
     # strip the cluster run name in case it ends with a space
     @target_directory = File.join(@settings['dir'], @settings['cluster_run'].strip)
-    @exported = Hash.new { |h, k| h[k] = [] }
+    # make sure output directory exists
+    java.io.File.new(@target_directory).mkdirs
+    @failures = {}
     ProgressDialog.forBlock do |progress_dialog|
       @dialog = initalize_dialog(progress_dialog, 'Cluster Export')
+      @dialog.logMessage("Exporting to #{@target_directory}")
+      @csv = report_csv_initialize
       run
+      close
     end
   end
 
-  # Completes the dialog, or logs the abortion.
-  def close_nx
-    return @dialog.setCompleted unless @dialog.abortWasRequested
+  # Closes the CSV, reports errors, and completes the dialog, or logs the abortion.
+  def close
+    @csv.close
+    return @dialog.setMainStatusAndLogIt('Aborted') if @dialog.abortWasRequested
 
-    @dialog.setMainStatusAndLogIt('Aborted')
+    report_errors unless @failures.empty?
+    @dialog.setCompleted
   end
 
-  # Exports item.
+  # Exports the item and writes record to report.
   #
-  # @param item [item]
-  # @param target_directory_cluster [String] target directory for item
-  def export_item(item, target_directory_cluster)
-    target_path = File.join(target_directory_cluster, new_file_name(item))
-    md5 = item.get_digests.get_md5
-    @exported[target_path] << md5 # add before target_path changes
-    target_path = new_file_path(target_path, md5) if File.exist?(target_path)
-    @dialog.logMessage("Exporting #{target_path}")
-    @exporter.exportItem(item, target_path)
+  # @param item [Item]
+  # @param path [String]
+  # @param cluster_name [String]
+  def export_item(item, path, cluster_name)
+    @dialog.logMessage("Exporting #{path}") if VERBOSE
+    begin
+      @exporter.exportItem(item, path)
+    rescue StandardError => e
+      message = e.message.to_s
+      @dialog.logMessage(message)
+      @failures[item.get_guid] = message
+      path = 'ERROR'
+    end
+    # Write record to CSV
+    @csv << report_csv_record(item, cluster_name, path)
   end
 
-  # Initializes ProgressDialog and gets selected clusters.
+  # Gets deduped items from the cluster.
   #
-  # @return [Set<Cluster>] the clusters to export
-  def initialize_cluster_run
-    clusters = @settings['clusters']
-    @dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
-    @dialog.logMessage("Target directory is #{@target_directory}")
-    @dialog.setMainProgress(0, clusters.size)
-    clusters
+  # @param cluster [Cluster]
+  # @return [Set<Item>] deduped items
+  def get_deduped_items(cluster)
+    cluster_items = cluster.get_items.map(&:get_item)
+    @dialog.logMessage("Cluster has #{cluster_items.size} items") if VERBOSE
+    deduped_items = ITEM_UTILITY.deduplicate(cluster_items)
+    if VERBOSE
+      @dialog.logMessage("#{deduped_items.size} items after deduplicating")
+    end
+    @dialog.setSubProgress(0, deduped_items.size)
+    deduped_items
+  end
+
+  # Calculates the export filenames up front.
+  # Colliding filenames are be renamed to include MD5.
+  #
+  # @param items [Set<Item>] a cluster's deuped items
+  # @return [{Item => String}] hash of items to their filename for export
+  def get_export_details(items)
+    export_details = {}
+    # Track if any filenames occur more than once
+    name_counts = Hash.new { |h, k| h[k] = 0 }
+    items.each do |item|
+      name = new_file_name(item)
+      name_counts[name] += 1
+      export_details[item] = name
+    end
+    # Fix filename collisions
+    export_details.each do |i, n|
+      if name_counts[n] > 1
+        # insert MD5 before extension
+        export_details[i] = String.new(n).insert((-1 - File.extname(n).size), " (#{i.getDigests.getMd5})")
+      end
+    end
+    export_details
   end
 
   # Initializes ProgressDialog
@@ -127,15 +173,6 @@ class ClusterExport
     "#{sanitized_item_name}\.#{new_file_ext(item)}"
   end
 
-  # Returns file path that includes digest.
-  #
-  # @param path [String]
-  # @param digest [String]
-  # @return [String] file name
-  def new_file_path(path, digest)
-    String.new(path).insert((-1 - File.extname(path).size), " (#{digest})")
-  end
-
   # Returns true/false if the item is nil or empty.
   #
   # @param obj [Object]
@@ -144,58 +181,86 @@ class ClusterExport
     obj.nil? || obj.strip.empty?
   end
 
-  # Renames iniitial files with name colisions to include digest.
-  def rename_exported
-    @dialog.setSubStatusAndLogIt('Including MD5 for filename colisions')
-    paths = @exported.reject { |_k, v| v.size == 1 }
-    @dialog.logMessage("Adding hash to #{paths.size} items")
-    @dialog.setSubProgress(0, paths.size)
-    paths.each_with_index do |(path, hashes), index|
-      @dialog.setSubProgress(index)
-      new_path = new_file_path(path, hashes.first)
-      @dialog.logMessage("Renaming to #{new_path}")
-      File.rename(path, new_path)
-    end
+  # Initalizes CSV report.
+  #
+  # @return [CSV] with headers written
+  def report_csv_initialize
+    csv = CSV.open(File.join(@target_directory, 'Report.csv'), 'w:utf-8')
+    # Add CSV headers
+    csv << [
+      'Item GUID',
+      'Item Name',
+      'Cluster ID',
+      'Cluster Thread',
+      'Cluster Endpoint Status',
+      'MD5 Digest',
+      'Original Path',
+      'Tags',
+      'Export Path'
+    ]
+    csv
+  end
+
+  # Generates the row for CSV report.
+  #
+  # @param item [Item]
+  # @param cluster_name [String]
+  # @param path [String]
+  # @return [Array<String>] record for CSV
+  def report_csv_record(item, cluster_name, path)
+    id = "#{@settings['cluster_run']}-#{cluster_name}"
+    [
+      item.get_guid,
+      item.get_localised_name,
+      id,
+      item.get_cluster_thread_indexes[id],
+      item.get_cluster_endpoint_status[id],
+      item.get_digests.get_md5,
+      File.join(item.get_localised_path_names.to_a),
+      item.getTags.join('; '),
+      path
+    ]
+  end
+
+  # Generates Errors.csv from items that failed to export (i.e. @failures).
+  def report_errors
+    @dialog.logMessage("#{@failures.size} items failed to export")
+    errors_path = File.join(@target_directory, 'Errors.csv')
+    @dialog.setSubStatusAndLogIt("Generating #{errors_path}")
+    error_file = CSV.open(errors_path, 'w:utf-8')
+    error_file << ['Item GUID', 'Error Message']
+    @failures.each { |guid, msg| error_file << [guid, msg] }
+    error_file.close
   end
 
   # Exports each cluster.
   def run
-    initialize_cluster_run.each_with_index do |c, c_index|
+    clusters = @settings['clusters']
+    @dialog.setMainStatusAndLogIt("Exporting #{clusters.size} clusters from #{@settings['cluster_run']}")
+    @dialog.setMainProgress(0, clusters.size)
+    clusters.each_with_index do |c, c_index|
       @dialog.setMainProgress(c_index)
       run_cluster(c)
       return nil if @dialog.abortWasRequested
     end
-    # Rename files that had name colisions
-    rename_exported
-    close_nx
   end
 
   # Exports items from cluster.
   #
   # @param cluster [Cluster]
   def run_cluster(cluster)
-    name = cluster_id(cluster)
-    @dialog.setSubStatusAndLogIt("Exporting Cluster #{name}")
-    # Iterate each item in cluster after deduplication
-    items = cluster.get_items.map(&:get_item)
-    @dialog.logMessage("Cluster has #{items.size} items")
-    run_items(items, File.join(@target_directory, name.to_s))
-  end
-
-  # Exports items after deduplicating.
-  #
-  # @param items [Collection<Items>]
-  # @param target_directory_cluster [String] export path
-  def run_items(items, target_directory_cluster)
-    # Make sure output directory exists
-    java.io.File.new(target_directory_cluster).mkdirs
-    deduped_items = ITEM_UTILITY.deduplicate(items)
-    @dialog.logMessage("#{deduped_items.size} items after deduplicating")
-    @dialog.setSubProgress(0, deduped_items.size)
-    deduped_items.each_with_index do |i, i_index|
+    cluster_name = id_to_name(cluster.getId)
+    @dialog.setSubStatusAndLogIt("Exporting Cluster #{cluster_name}")
+    # Make sure output directory for cluster exists
+    target_path = File.join(@target_directory, cluster_name)
+    java.io.File.new(target_path).mkdirs
+    # Calculate export details and check for filename collisions
+    export_details = get_export_details(get_deduped_items(cluster))
+    export_details.each_with_index do |(item, name), i_index|
       @dialog.setSubProgress(i_index)
-      export_item(i, target_directory_cluster)
       return nil if @dialog.abortWasRequested
+
+      export_item(item, File.join(target_path, name), cluster_name)
     end
   end
 
@@ -241,17 +306,22 @@ class ClusterExportSettings
   def append_dynamic_table(identifier, control)
     header = ['Cluster Run', 'ID', 'Items', 'Deduplicated Items']
     run_control = @main_tab.getControl(control)
+    dedupe_count_cache = {}
     @main_tab.appendDynamicTable(identifier, 'Clusters', header, cluster_records(@cluster_runs[0].get_name)) do |record, column_index, _setting_value, _value|
       items = record.get_items
       case column_index
       when 0
         run_control.getSelectedItem
       when 1
-        cluster_id(record)
+        id_to_name(record.getId)
       when 2
         items.size
       when 3
-        ITEM_UTILITY.deduplicate(items.map(&:get_item)).size
+        dedupe_count = dedupe_count_cache[record.getId]
+        if dedupe_count.nil?
+          dedupe_count = dedupe_count_cache[record.getId] = ITEM_UTILITY.deduplicate(items.map(&:get_item)).size
+        end
+        dedupe_count
       end
     end
     initialize_dynamic_table(identifier, run_control)
@@ -311,8 +381,12 @@ class ClusterExportSettings
   # @param values [Hash] input values
   # @return [true, false] if in valid run state
   def validate_input(values)
-    return CommonDialogs.showWarning('Please select export directory') if values['dir'].empty?
-    return CommonDialogs.showWarning('Please select clusters') if values['clusters'].empty?
+    if values['dir'].empty?
+      return CommonDialogs.showWarning('Please select export directory')
+    end
+    if values['clusters'].empty?
+      return CommonDialogs.showWarning('Please select clusters')
+    end
 
     true
   end
